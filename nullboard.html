@@ -1701,6 +1701,7 @@
 </body>
 
 <script src="extras/jquery-3.6.0.min.js"></script>
+<script src="extras/pocketbase.umd.js"></script>
 <script>window.jQuery || document.write('<script src="https://code.jquery.com/jquery-3.6.0.min.js">\x3C/script>')</script>
 
 <script type="text/javascript">
@@ -1721,14 +1722,14 @@
 
 </script>
 
-<script type="text/javascript">
+<script type="text/javascript" type="module">
 
 	function AppConfig()
 	{
 		this.verLast      = null;           // last used codeVersion
 		this.verSeen      = null;           // latest codeVersion they saw the changelog for
 
-		this.maxUndo      = 50;             // board revisions to keep
+		this.maxUndo      = 0;             // board revisions to keep
 		this.fontName     = null;           // font-family
 		this.fontSize     = null;           // font-size
 		this.lineHeight   = null;           // line-height
@@ -1773,7 +1774,7 @@
 			};
 		}
 
-		open()
+		async open()
 		{
 			return this.openInner();
 		}
@@ -2233,6 +2234,54 @@
 				});
 			});
 		}
+		/*
+ *	private
+ */
+		rebuildMeta(board_id)
+		{
+			var meta = new BoardMeta();
+
+			console.log( `Rebuilding meta for ${board_id} ...` );
+
+			// get current revision
+
+			meta.current = this.getItem('board.' + board_id); // may be null
+
+			// load history
+
+			var re = new RegExp('^nullboard\.board\.' + board_id + '\.(\\d+)$');
+			var revs = new Array();
+
+			for (var i=0; i<localStorage.length; i++)
+			{
+				var m = localStorage.key(i).match(re);
+				if (m) revs.push( parseInt(m[1]) );
+			}
+
+			if (! revs.length)
+			{
+				console.log('* No revisions found');
+				this.delItem('board.' + board_id);
+				return false;
+			}
+
+			revs.sort(function(a,b){ return b-a; });
+			meta.history = revs;
+
+			// validate current revision
+
+			if (! meta.history.includes(meta.current))
+				meta.current = meta.history[meta.history.length-1];
+
+			// get board title
+
+			var board = this.getJson('board.' + board_id + '.' + meta.current)
+			meta.title = (board.title || '(untitled board)');
+
+			this.setJson('board.' + board_id + '.meta', meta);
+
+			return meta;
+		}
 	};
 
 	class Storage_Local extends Storage
@@ -2260,7 +2309,7 @@
 			return true;
 		}
 
-		openInner()
+		async openInner()
 		{
 			var conf = this.getJson('config');
 			var newInstall = true;
@@ -2381,9 +2430,174 @@
 			this.boardIndex = new Map();
 		}
 
-		/*
-		 *	private
-		 */
+	}
+	class Storage_PocketBase extends Storage {
+
+		constructor() {
+			super();
+			this.type = 'PocketBaseStorage';
+			this.pocketBase = new PocketBase("http://pocketbase.donut.host");
+			this.spaceID = window.location.hash;
+		}
+
+		getItem(name)
+		{
+			return this.currentSpace.data[`nullboard.${name}`];
+		}
+
+		setItem(name, val)
+		{
+			this.skipNextEvent = true;
+			this.currentSpace.data[`nullboard.${name}`]=val;
+			this.pocketBase.collection("spaces").update("6nokch1njscyfhk", this.currentSpace);
+			return true;
+		}
+
+		delItem(name)
+		{
+			console.error("Deleting is not Implemented");
+			return true;
+		}
+
+		getItemLocal(name)
+		{
+			return localStorage.getItem('nullboard.' + name);
+		}
+
+		setItemLocal(name, val)
+		{
+			localStorage.setItem('nullboard.' + name, val);
+			return true;
+		}
+
+		delItemLocal(name)
+		{
+			localStorage.removeItem('nullboard.' + name);
+			return true;
+		}
+
+		getJsonLocal(name)
+		{
+			var foo = this.getItemLocal(name);
+			if (! foo) return false;
+
+			try { foo = JSON.parse(foo); } catch (x) { return false; }
+			return foo;
+		}
+
+		setJsonLocal(name, val)
+		{
+			if (! this.setItemLocal(name, JSON.stringify(val)))
+			{
+				console.log("setJson(" + name + ") failed");
+				return false;
+			}
+
+			return true;
+		}
+
+		getJson(name)
+		{
+			return this.getItem(name);
+		}
+
+		setJson(name, val)
+		{
+			return this.setItem(name, val);
+		}
+
+		async openInner()
+		{
+			try {
+				this.currentSpace = await this.pocketBase.collection("spaces").getOne("6nokch1njscyfhk");
+				this.pocketBase.collection("spaces").subscribe("6nokch1njscyfhk", (e)=>{
+					if(this.skipNextEvent) {
+						this.skipNextEvent = false;
+						return;
+					}
+					console.log("Recieved Update to Space from Backend");
+					this.currentSpace = e.record;
+					this.rebuildBoardIndex();
+					updateBoardIndex();
+					const newBoard = this.boardIndex.get(NB.board.id);
+					if(newBoard.current > NB.board.revision) {
+						openBoard(NB.board.id, NB.board.revision);
+					}
+				});
+			} catch (ex) {
+				console.error(ex);
+				return false;
+			}
+
+			const conf = this.getJsonLocal('config');
+			if (conf)
+			{
+				this.conf = Object.assign(new AppConfig(), conf);
+			}
+			else
+			{
+				this.conf.theme = this.getItemLocal('theme');
+
+				if (this.getItemLocal('fsize') == 'z1')
+				{
+					this.conf.fontSize   = 13;
+					this.conf.lineHeight = 17;
+				}
+
+				if (! this.setItemLocal('config', this.conf))
+				{
+					this.conf = null;
+					return false;
+				}
+
+				this.conf.board = this.getItemLocal('last_board');
+			}
+
+			this.rebuildBoardIndex();
+
+			return true;
+		}
+
+		rebuildBoardIndex() {
+			this.boardIndex = new Map();
+
+			// new format
+			const boards = Object.entries(this.currentSpace.data).filter((spaceBoard)=>spaceBoard[0].startsWith("nullboard.board"));
+			for (let [board_id, board] of boards)
+			{
+				board_id = parseInt(board_id.replace("nullboard.board.",""));
+				var meta = this.getItem("board."+board_id + '.meta');
+				//
+				// if (! meta.hasOwnProperty('history'))
+				// {
+				// 	console.log( `Invalid meta for board ${board_id}` );
+				// 	continue;
+				// }
+				//
+				// for (const rev of meta.history)
+				// 	if (! this.getItem('board.' + board_id + '.' + rev))
+				// 	{
+				// 		console.log( `Invalid revision ${rev} in history of ${board_id}` );
+				// 		meta = this.rebuildMeta(board_id);
+				// 		break;
+				// 	}
+
+				if (! meta)
+					continue;
+
+				delete meta.backingUp;      // run-time var
+				delete meta.needsBackup;    // ditto
+
+				meta = Object.assign(new BoardMeta(), meta);
+				this.boardIndex.set(board_id, meta);
+			}
+		}
+
+		wipeInner() {
+
+		}
+
+		//private
 		rebuildMeta(board_id)
 		{
 			var meta = new BoardMeta();
@@ -2396,39 +2610,40 @@
 
 			// load history
 
-			var re = new RegExp('^nullboard\.board\.' + board_id + '\.(\\d+)$');
-			var revs = new Array();
-
-			for (var i=0; i<localStorage.length; i++)
-			{
-				var m = localStorage.key(i).match(re);
-				if (m) revs.push( parseInt(m[1]) );
-			}
-
-			if (! revs.length)
-			{
-				console.log('* No revisions found');
-				this.delItem('board.' + board_id);
-				return false;
-			}
-
-			revs.sort(function(a,b){ return b-a; });
-			meta.history = revs;
+			// var re = new RegExp('^nullboard\.board\.' + board_id + '\.(\\d+)$');
+			// var revs = new Array();
+			//
+			// for (var i=0; i<localStorage.length; i++)
+			// {
+			// 	var m = localStorage.key(i).match(re);
+			// 	if (m) revs.push( parseInt(m[1]) );
+			// }
+			//
+			// if (! revs.length)
+			// {
+			// 	console.log('* No revisions found');
+			// 	this.delItem('board.' + board_id);
+			// 	return false;
+			// }
+			//
+			// revs.sort(function(a,b){ return b-a; });
+			// meta.history = revs;
 
 			// validate current revision
-
-			if (! meta.history.includes(meta.current))
-				meta.current = meta.history[meta.history.length-1];
+			//
+			// if (! meta.history.includes(meta.current))
+			// 	meta.current = meta.history[meta.history.length-1];
 
 			// get board title
 
 			var board = this.getJson('board.' + board_id + '.' + meta.current)
 			meta.title = (board.title || '(untitled board)');
 
-			this.setJson('board.' + board_id + '.meta', meta);
+			this.setItem('board.' + board_id + '.meta', meta);
 
 			return meta;
 		}
+
 	}
 
 	/*
@@ -3039,17 +3254,17 @@
 	 */
 	var easyMartina = false;
 
-	window.onerror = function(message, file, line, col, e){
-		var cb1;
-		if (! easyMartina) alert("Error occurred: " + e.message);
-		return false;
-	};
+	// window.onerror = function(message, file, line, col, e){
+	// 	var cb1;
+	// 	if (! easyMartina) alert("Error occurred: " + e.message);
+	// 	return false;
+	// };
 
-	window.addEventListener("error", function(e) {
-		var cb2;
-		if (! easyMartina) alert("Error occurred: " + e.error.message);
-		return false;
-	});
+	// window.addEventListener("error", function(e) {
+	// 	var cb2;
+	// 	if (! easyMartina) alert("Error occurred: " + e.error.message);
+	// 	return false;
+	// });
 
 	/*
 	 *	notes / lists / boards
@@ -4921,10 +5136,18 @@
 	});
 
 	$(document).on('mousemove', function(ev){
+		if(!NB) {
+			return;
+		}
 		setRevealState(ev);
-		NB.noteDrag.onMouseMove(ev);
-		NB.loadDrag.onMouseMove(ev);
-		NB.varAdjust.onMouseMove(ev);
+		try {
+			NB.noteDrag.onMouseMove(ev);
+			NB.loadDrag.onMouseMove(ev);
+			NB.varAdjust.onMouseMove(ev);
+		} catch (ex) {
+			console.error(ex);
+		}
+
 	});
 
 	//
@@ -5075,97 +5298,101 @@
 	$(window).resize(adjustLayout);
 
 	$('body').on('dragstart', function(){ return false; });
-
-	/*
+	var NB;
+	async function initApp() {
+		/*
 	 *	the init()
 	 */
-	var NB =
-	{
-		codeVersion: 20221112,
-		blobVersion: 20190412, // board blob format in Storage
-		board: null,
-		storage: null,
+		NB =
+				{
+					codeVersion: 20221112,
+					blobVersion: 20190412, // board blob format in Storage
+					board: null,
+					storage: null,
 
-		peek: function(name)
-		{
-			return this.storage.getConfig()[name];
-		},
+					peek: function(name)
+					{
+						return this.storage.getConfig()[name];
+					},
 
-		poke: function(name, val)
+					poke: function(name, val)
+					{
+						var conf = this.storage.getConfig();
+						conf[name] = val;
+						return this.storage.saveConfig();
+					}
+				};
+
+		NB.storage = new Storage_PocketBase();
+
+		if (!(await NB.storage.open()))
 		{
-			var conf = this.storage.getConfig();
-			conf[name] = val;
-			return this.storage.saveConfig();
+			easyMartina = true;
+			throw new Error();
 		}
-	};
 
-	NB.storage = new Storage_Local();
+		var boards = NB.storage.getBoardIndex();
 
-	if (! NB.storage.open())
-	{
-		easyMartina = true;
-		throw new Error();
+		boards.forEach( function(meta, board_id) {
+			var hist = meta.history.join(', ');
+			console.log( `Found board ${board_id} - "${meta.title}", revision ${meta.current}, history [${hist}], backup ${JSON.stringify(meta.backupStatus)}` );
+		});
+
+		//
+		var conf = NB.storage.getConfig();
+
+		console.log( `Active:    [${conf.board}]` );
+		console.log( `Theme:     [${conf.theme}]` );
+		console.log( `Font:      [${conf.fontName}], size [${conf.fontSize || '-'}], line-height [${conf.lineHeight || '-'}]` );
+		console.log( `FileLinks: [${conf.fileLinks}]` );
+		console.log( 'Backups:   ', conf.backups);
+
+		/*
+         *	backups
+         */
+		NB.backupTypes = new Map();
+		NB.backupTypes.set( (new SimpleBackup).type, SimpleBackup );
+
+		NB.storage.initBackups(onBackupStatusChange);
+
+		/*
+         *	the ui
+         */
+		initFonts();
+
+		initDragAndDrop();
+
+		NB.varAdjust = new VarAdjust()
+
+		//
+		if (conf.theme)
+			$('html').addClass('theme-' + conf.theme);
+
+		if (conf.board)
+			openBoard(conf.board);
+
+		adjustLayout();
+
+		updateBoardIndex();
+
+		setWhatsNew();
+
+		NB.storage.setVerLast();
+
+		//
+		if (! NB.board && ! $('.config .load-board').length)
+			NB.board = createDemoBoard();
+
+		if (NB.board)
+			showBoard(true);
+
+		//
+		setInterval(adjustListScroller, 100);
+
+		setupListScrolling();
 	}
+	initApp();
 
-	var boards = NB.storage.getBoardIndex();
-
-	boards.forEach( function(meta, board_id) {
-		var hist = meta.history.join(', ');
-		console.log( `Found board ${board_id} - "${meta.title}", revision ${meta.current}, history [${hist}], backup ${JSON.stringify(meta.backupStatus)}` );
-	});
-
-	//
-	var conf = NB.storage.getConfig();
-
-	console.log( `Active:    [${conf.board}]` );
-	console.log( `Theme:     [${conf.theme}]` );
-	console.log( `Font:      [${conf.fontName}], size [${conf.fontSize || '-'}], line-height [${conf.lineHeight || '-'}]` );
-	console.log( `FileLinks: [${conf.fileLinks}]` );
-	console.log( 'Backups:   ', conf.backups);
-
-	/*
-	 *	backups
-	 */
-	NB.backupTypes = new Map();
-	NB.backupTypes.set( (new SimpleBackup).type, SimpleBackup );
-
-	NB.storage.initBackups(onBackupStatusChange);
-
-	/*
-	 *	the ui
-	 */
-	initFonts();
-
-	initDragAndDrop();
-
-	NB.varAdjust = new VarAdjust()
-
-	//
-	if (conf.theme)
-		$('html').addClass('theme-' + conf.theme);
-
-	if (conf.board)
-		openBoard(conf.board);
-
-	adjustLayout();
-
-	updateBoardIndex();
-
-	setWhatsNew();
-
-	NB.storage.setVerLast();
-
-	//
-	if (! NB.board && ! $('.config .load-board').length)
-		NB.board = createDemoBoard();
-
-	if (NB.board)
-		showBoard(true);
-
-	//
-	setInterval(adjustListScroller, 100);
-
-	setupListScrolling();
 
 </script>
 
