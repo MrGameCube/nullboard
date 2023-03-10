@@ -1703,7 +1703,8 @@
 <script src="extras/jquery-3.6.0.min.js"></script>
 <script src="extras/pocketbase.umd.js"></script>
 <script>window.jQuery || document.write('<script src="https://code.jquery.com/jquery-3.6.0.min.js">\x3C/script>')</script>
-
+<!--Host Configuration-->
+<script src="config.js"></script>
 <script type="text/javascript">
 
 	Number.prototype.clamp = function(min, max)
@@ -2436,8 +2437,8 @@
 		constructor() {
 			super();
 			this.type = 'PocketBaseStorage';
-			this.pocketBase = new PocketBase("http://pocketbase.donut.host");
-			this.spaceID = window.location.hash;
+			this.pocketBase = new PocketBase(HOST_CONFIG.pocketBaseURL);
+			this.spaceID = window.location.hash.replace("#","");
 		}
 
 		getItem(name)
@@ -2449,7 +2450,7 @@
 		{
 			this.skipNextEvent = true;
 			this.currentSpace.data[`nullboard.${name}`]=val;
-			this.pocketBase.collection("spaces").update("6nokch1njscyfhk", this.currentSpace);
+			this.pocketBase.collection(HOST_CONFIG.spaceCollection).update(this.spaceID, this.currentSpace);
 			return true;
 		}
 
@@ -2509,8 +2510,12 @@
 		async openInner()
 		{
 			try {
-				this.currentSpace = await this.pocketBase.collection("spaces").getOne("6nokch1njscyfhk");
-				this.pocketBase.collection("spaces").subscribe("6nokch1njscyfhk", (e)=>{
+				if(!this.spaceID) {
+					this.spaceID = (await this.pocketBase.collection(HOST_CONFIG.spaceCollection).create({data: {}})).id;
+					window.location.hash = "#"+this.spaceID;
+				}
+				this.currentSpace = await this.pocketBase.collection(HOST_CONFIG.spaceCollection).getOne(this.spaceID);
+				this.pocketBase.collection(HOST_CONFIG.spaceCollection).subscribe(this.spaceID, (e)=>{
 					if(this.skipNextEvent) {
 						this.skipNextEvent = false;
 						return;
@@ -5323,7 +5328,9 @@
 					}
 				};
 
-		NB.storage = new Storage_PocketBase();
+			NB.storage = new Storage_PocketBase();
+
+
 
 		if (!(await NB.storage.open()))
 		{
